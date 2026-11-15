@@ -204,7 +204,7 @@ async function webDownload(filename, data, note) {
 <script>
 (() => {
 "use strict";
-const APP_VERSION = "web-v2";
+const APP_VERSION = "web-v3";
 const KEY = "haushaltsbuch.v1", UNDO = "haushaltsbuch.rueckgaengig";
 const MON = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"], MS = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
 const KINDS = { in: "Einnahmen", fix: "Feste Ausgaben", var: "Laufende Ausgaben", save: "Rücklagen" };
@@ -241,7 +241,7 @@ function toast(msg) { const t = document.getElementById("toast"); t.textContent 
 function emptyDb() {
   const cats = []; let n = 0;
   for (const [kind, groups] of Object.entries(DEF)) for (const [group, names] of Object.entries(groups)) for (const name of names) cats.push({ id: "k" + ++n, kind, group, name, budget: null });
-  return { v: 2, cats, recs: [], tx: [], meta: { lastBackup: null, dirtySince: null } };
+  return { v: 3, cats, recs: [], tx: [], meta: { lastBackup: null, dirtySince: null } };
 }
 let db;
 function load() {
@@ -255,6 +255,7 @@ function migrate() {
     for (const name of ["Ratenkredit", "Immobilienkredit", "Autokredit"]) if (!db.cats.some((c) => c.kind === "fix" && c.name === name)) db.cats.push({ id: uid(), kind: "fix", group: "Kredite", name, budget: null });
     db.v = 2; try { localStorage.setItem(KEY, JSON.stringify(db)); } catch {}
   }
+  if (db.v < 3) { db.v = 3; try { localStorage.setItem(KEY, JSON.stringify(db)); } catch {} }
 }
 function ownCat(name, kind) {
   name = String(name || "").trim(); if (!name) return null;
@@ -281,22 +282,28 @@ function recDates(r, from, to) {
 function recBase(r, d) { let a = r.amounts[0]?.amount ?? 0; for (const x of [...r.amounts].sort((p, q) => p.from.localeCompare(q.from))) if (x.from <= d) a = x.amount; return a; }
 function entries(from, to) {
   const out = [];
-  for (const t of db.tx) if (t.date >= from && t.date <= to) out.push({ date: t.date, catId: t.catId, kind: kindOf(t.catId), amount: t.amount, note: t.note || "", tx: t });
-  for (const r of db.recs) for (const d of recDates(r, from, to)) { const o = r.over?.[d]; if (o?.skip) continue; out.push({ date: d, catId: r.catId, kind: kindOf(r.catId), amount: o ? o.amount : recBase(r, d), note: r.name || "", rec: r, changed: !!o }); }
+  for (const t of db.tx) if (t.date >= from && t.date <= to) { const k = t.back ? "back" : kindOf(t.catId), pot = (k === "fix" || k === "var") && t.pot && cat(t.pot) ? t.pot : null; out.push({ date: t.date, catId: t.catId, kind: k, amount: t.amount, note: t.note || "", tx: t, pot, fromPot: pot ? Math.min(t.potAmt ?? t.amount, t.amount) : 0 }); }
+  for (const r of db.recs) for (const d of recDates(r, from, to)) { const o = r.over?.[d]; if (o?.skip) continue; const k = kindOf(r.catId), a = o ? o.amount : recBase(r, d), pot = (k === "fix" || k === "var") && r.pot && cat(r.pot) ? r.pot : null; out.push({ date: d, catId: r.catId, kind: k, amount: a, note: r.name || "", rec: r, changed: !!o, pot, fromPot: pot ? a : 0 }); }
   return out.sort((a, b) => b.date.localeCompare(a.date));
 }
-function sums(list) { const s = { in: 0, fix: 0, var: 0, save: 0 }; for (const e of list) s[e.kind] += e.amount; s.out = s.fix + s.var; s.rest = s.in - s.out - s.save; return s; }
+/* Übrig = Einnahmen − Ausgaben + aus Rücklagen bezahlt − in Rücklagen eingezahlt + aufgelöste Rücklagen */
+function sums(list) { const s = { in: 0, fix: 0, var: 0, save: 0, back: 0, pot: 0 }; for (const e of list) { s[e.kind] += e.amount; s.pot += e.fromPot || 0; } s.out = s.fix + s.var; s.rest = s.in - s.out + s.pot - s.save + s.back; return s; }
+const pots = () => db.cats.filter((c) => c.kind === "save");
+function potMoves(id) { return booked("0000-01-01", today()).filter((e) => (e.kind === "save" && e.catId === id) || (e.kind === "back" && e.catId === id) || e.pot === id); }
+function potState(id) { const c = cat(id), x = { open: c?.opening || 0, inn: 0, paid: 0, back: 0 }; for (const e of potMoves(id)) { if (e.kind === "save") x.inn += e.amount; else if (e.kind === "back") x.back += e.amount; else x.paid += e.fromPot; } x.bal = x.open + x.inn - x.paid - x.back; return x; }
+const potOptions = (v) => `<option value="">Nein</option>${pots().map((c) => `<option value="${c.id}" ${c.id === v ? "selected" : ""}>${esc(c.name)} (${fE(potState(c.id).bal)})</option>`).join("")}`;
 /* gebucht ist, was fällig ist: bis heute */
 const booked = (from, to) => entries(from, to < today() ? to : today() < from ? "0000-00-00" : today());
-const signed = (e) => (e.kind === "in" ? e.amount : -e.amount);
-const cls = (k) => (k === "in" ? "pos" : k === "save" ? "sav" : "neg");
+const signed = (e) => (e.kind === "in" || e.kind === "back" ? e.amount : -e.amount);
+const cls = (k) => (k === "in" || k === "back" ? "pos" : k === "save" ? "sav" : "neg");
+const kindName = (k) => KINDS[k] || "Rücklage aufgelöst";
 
 /* ---------- Dateien ---------- */
 const offer = (name, data) => webDownload(name, data, toast);
 
 /* ---------- Zustand, Bausteine ---------- */
-const st = { tab: "monat", form: null, month: today().slice(0, 7), year: today().slice(0, 4), q: { type: "out", catId: "", amount: "", date: today(), note: "" }, lastCat: {}, open: null, s: { from: today().slice(0, 4) + "-01-01", to: today(), cat: "", text: "" }, confirm: null, recKind: "fix" };
-const TABS = [["monat", "Monat"], ["auswertung", "Auswertung"], ["jahr", "Jahr"], ["suche", "Suche"], ["posten", "Feste Posten"], ["kategorien", "Kategorien"], ["hinweise", "Hinweise"]];
+const st = { tab: "monat", form: null, month: today().slice(0, 7), year: today().slice(0, 4), q: { type: "out", catId: "", amount: "", date: today(), note: "", pot: "", potAmt: "" }, openPot: null, lastCat: {}, open: null, s: { from: today().slice(0, 4) + "-01-01", to: today(), cat: "", text: "" }, confirm: null, recKind: "fix" };
+const TABS = [["monat", "Monat"], ["auswertung", "Auswertung"], ["ruecklagen", "Rücklagen"], ["jahr", "Jahr"], ["suche", "Suche"], ["posten", "Feste Posten"], ["kategorien", "Kategorien"], ["hinweise", "Hinweise"]];
 const inp = (p, v, o = {}) => `<input data-p="${p}" ${o.t ? `data-t="${o.t}"` : ""} ${o.t === "n" ? 'inputmode="decimal"' : ""} type="${o.type || "text"}" value="${esc(o.t === "n" ? fN(v) : v ?? "")}" ${o.ph ? `placeholder="${esc(o.ph)}"` : ""} ${o.al ? `aria-label="${esc(o.al)}"` : ""}>`;
 const fld = (label, html, c = "") => `<label class="f ${c}">${label}${html}</label>`;
 function catOptions(kinds, v, blank, own) {
@@ -312,10 +319,10 @@ const delBtn = (act, id, label = "Löschen") => (st.confirm === act + id ? `<but
 const typeChips = (act, cur) => `<div class="row" style="gap:6px">${[["out", "Ausgabe"], ["in", "Einnahme"], ["save", "Rücklage"]].map(([k, l]) => `<button class="chipbtn" aria-pressed="${cur === k}" data-act="${act}" data-v="${k}">${l}</button>`).join("")}</div>`;
 function txRow(e) {
   const id = e.tx ? `data-act="tx-edit" data-id="${e.tx.id}"` : `data-act="occ-edit" data-id="${e.rec.id}" data-d="${e.date}"`;
-  return `<div class="tx" ${id}><span class="muted small">${fDay(e.date)}</span><span><b>${esc(catName(e.catId))}</b>${e.rec ? ` <span class="muted small" title="fester Posten">↻${e.changed ? " geändert" : ""}</span>` : ""}</span><span class="a ${cls(e.kind)}">${e.kind === "in" ? "+" : "−"} ${fE(e.amount)}</span>${e.note ? `<span class="n small muted">${esc(e.note)}</span>` : ""}</div>`;
+  return `<div class="tx" ${id}><span class="muted small">${fDay(e.date)}</span><span><b>${esc(catName(e.catId))}</b>${e.rec ? ` <span class="muted small" title="fester Posten">↻${e.changed ? " geändert" : ""}</span>` : ""}</span><span class="a ${cls(e.kind)}">${e.kind === "in" || e.kind === "back" ? "+" : "−"} ${fE(e.amount)}</span>${e.kind === "back" ? '<span class="n small sav">Rücklage aufgelöst</span>' : ""}${e.pot ? `<span class="n small sav">aus ${esc(catName(e.pot))}${e.fromPot < e.amount ? ": " + fE(e.fromPot) : ""}</span>` : ""}${e.note ? `<span class="n small muted">${esc(e.note)}</span>` : ""}</div>`;
 }
 const monthNav = () => `<div class="row between"><button class="ghost" data-act="m-mv" data-n="-1" aria-label="Vorheriger Monat">‹</button><h2>${mName(st.month)}</h2><button class="ghost" data-act="m-mv" data-n="1" aria-label="Nächster Monat">›</button></div>`;
-function kpis(s) { return `<div class="kpis"><div class="kpi"><span class="eyebrow">Einnahmen</span><b class="pos">${fE(s.in)}</b></div><div class="kpi"><span class="eyebrow">Ausgaben</span><b class="neg">${fE(s.out)}</b></div><div class="kpi"><span class="eyebrow">Rücklagen</span><b class="sav">${fE(s.save)}</b></div><div class="kpi"><span class="eyebrow">Übrig</span><b class="${s.rest < 0 ? "neg" : ""}">${fE(s.rest)}</b></div></div>`; }
+function kpis(s) { return `<div class="kpis"><div class="kpi"><span class="eyebrow">Einnahmen</span><b class="pos">${fE(s.in)}</b></div><div class="kpi"><span class="eyebrow">Ausgaben</span><b class="neg">${fE(s.out)}</b></div><div class="kpi"><span class="eyebrow">Rücklagen</span><b class="sav">${fE(s.save)}</b></div><div class="kpi"><span class="eyebrow">Übrig</span><b class="${s.rest < 0 ? "neg" : ""}">${fE(s.rest)}</b></div></div>${s.pot || s.back ? `<div class="small sav">${[s.pot && "Von den Ausgaben aus Rücklagen bezahlt: " + fE(s.pot), s.back && "Rücklagen aufgelöst: " + fE(s.back)].filter(Boolean).join(" · ")}</div>` : ""}`; }
 function backupBanner() {
   const s = db.meta.dirtySince; if (!s) return "";
   const days = Math.round((pd(today()) - pd(s)) / 864e5); if (days < 7) return "";
@@ -329,7 +336,7 @@ function viewMonat() {
   const fut = to > t ? entries(t >= from ? iso(new Date(pd(t).getFullYear(), pd(t).getMonth(), pd(t).getDate() + 1)) : from, to) : [], fs = sums(fut);
   return `<div class="stack">${backupBanner()}
     <div class="panel stack"><h3>Schnell buchen</h3>${typeChips("q-type", q.type)}
-      <div class="grid4"><label class="f">Betrag<input data-q="amount" inputmode="decimal" value="${esc(q.amount)}" placeholder="0,00"></label><label class="f">Kategorie<select data-q="catId">${catOptions(kinds, q.catId, "", true)}</select>${q.catId === OWN ? `<input data-q="catOwn" value="${esc(q.catOwn || "")}" placeholder="Name der Kategorie" style="margin-top:6px">` : ""}</label><label class="f">Datum<input data-q="date" type="date" value="${q.date}"></label><label class="f">Notiz<input data-q="note" value="${esc(q.note)}"></label></div>
+      <div class="grid4"><label class="f">Betrag<input data-q="amount" inputmode="decimal" value="${esc(q.amount)}" placeholder="0,00"></label><label class="f">Kategorie<select data-q="catId">${catOptions(kinds, q.catId, "", true)}</select>${q.catId === OWN ? `<input data-q="catOwn" value="${esc(q.catOwn || "")}" placeholder="Name der Kategorie" style="margin-top:6px">` : ""}</label><label class="f">Datum<input data-q="date" type="date" value="${q.date}"></label><label class="f">Notiz<input data-q="note" value="${esc(q.note)}"></label>${q.type === "out" ? `<label class="f">Aus Rücklage bezahlen<select data-q="pot">${potOptions(q.pot)}</select></label>${q.pot ? `<label class="f">Davon aus Rücklage<input data-q="potAmt" inputmode="decimal" value="${esc(q.potAmt)}" placeholder="ganzer Betrag"></label>` : ""}` : ""}</div>
       <div><button data-act="q-book">Buchen</button></div></div>
     ${monthNav()}${kpis(s)}
     ${fut.length ? `<div class="small muted">Bis Monatsende noch fällig: Einnahmen ${fE(fs.in)}, Ausgaben ${fE(fs.out)}, Rücklagen ${fE(fs.save)}. Voraussichtlich übrig: ${fE(s.rest + fs.rest)}.</div>` : ""}
@@ -346,18 +353,18 @@ function viewAuswertung() {
     return `<div class="panel"><div class="row between"><h3>${title}</h3><b>${fE(total)}</b></div>${[...rows, ...withB].map(([id, a]) => { const c = cat(id), b = c?.budget, pct = total ? (a / total) * 100 : 0, use = b ? a / b : null, lamp = use == null ? "" : use >= 1 ? "r" : use >= 0.8 ? "y" : "g";
       return `<div class="catrow" data-act="cat-open" data-id="${id}"><div class="row between"><span>${lamp ? `<span class="lamp ${lamp}"></span>` : ""}<b>${esc(catName(id))}</b> <span class="muted small">${esc(c?.group || "")}</span></span><span style="font-variant-numeric:tabular-nums">${fE(a)} <span class="muted small">${pct.toLocaleString("de-DE", { maximumFractionDigits: 1 })} %</span></span></div>
         <div class="bar ${lamp === "g" ? "" : lamp}"><i style="width:${Math.min(100, b ? use * 100 : pct).toFixed(1)}%"></i></div>${b ? `<div class="small muted">Budget ${fE(b)} · ${a > b ? "überschritten um " + fE(a - b) : "noch " + fE(b - a)}</div>` : ""}
-        ${st.open === id ? `<div style="margin-top:6px">${list.filter((e) => e.catId === id).map(txRow).join("") || '<span class="muted small">Keine Buchungen.</span>'}</div>` : ""}</div>`; }).join("") || '<div class="muted">Keine Buchungen.</div>'}</div>`; };
+        ${st.open === id ? `<div style="margin-top:6px">${list.filter((e) => e.catId === id && e.kind !== "back").map(txRow).join("") || '<span class="muted small">Keine Buchungen.</span>'}</div>` : ""}</div>`; }).join("") || '<div class="muted">Keine Buchungen.</div>'}</div>`; };
   const pm = mAdd(st.month, -1), py = mAdd(st.month, -12), sp = sums(booked(pm + "-01", mEnd(pm))), sy = sums(booked(py + "-01", mEnd(py)));
   const dl = (a, b, inv) => { const d = a - b; return `<td class="r ${d === 0 ? "" : (d > 0) !== !!inv ? "pos" : "neg"}">${d > 0 ? "+" : d < 0 ? "−" : ""}${fE(Math.abs(d))}</td>`; };
   const cmp = [["Einnahmen", "in", 0], ["Feste Ausgaben", "fix", 1], ["Laufende Ausgaben", "var", 1], ["Rücklagen", "save", 0], ["Übrig", "rest", 0]].map(([l, k, inv]) => `<tr class="${k === "rest" ? "sum" : ""}"><td>${l}</td><td class="r">${fE(s[k])}</td><td class="r">${fE(sp[k])}</td>${dl(s[k], sp[k], inv)}<td class="r">${fE(sy[k])}</td>${dl(s[k], sy[k], inv)}</tr>`).join("");
-  const quote = s.in ? (s.save / s.in) * 100 : null, fixq = s.out ? (s.fix / s.out) * 100 : null;
+  const quote = s.in ? ((s.save - s.pot - s.back) / s.in) * 100 : null, fixq = s.out ? (s.fix / s.out) * 100 : null;
   /* Vorschau */
   const prev = [1, 2, 3].map((i) => { const m = mAdd(today().slice(0, 7), i), l = entries(m + "-01", mEnd(m)).filter((e) => e.rec), x = sums(l); return `<tr><td>${mName(m)}</td><td class="r">${fE(x.in)}</td><td class="r">${fE(x.fix)}</td><td class="r">${fE(x.save)}</td><td class="r">${fE(x.rest)}</td></tr>`; }).join("");
   const act = db.recs.filter((r) => !r.end || r.end >= today()), per = (r) => recBase(r, today()) / r.rhythm;
   const mon = { in: 0, fix: 0, var: 0, save: 0 }; for (const r of act) mon[kindOf(r.catId)] += per(r);
   const rare = act.filter((r) => r.rhythm > 1 && kindOf(r.catId) !== "in");
   return `<div class="stack">${monthNav()}${kpis(s)}
-    <div class="kpis"><div class="kpi"><span class="eyebrow">Feste Ausgaben</span><b>${fE(s.fix)}</b></div><div class="kpi"><span class="eyebrow">Laufende Ausgaben</span><b>${fE(s.var)}</b></div><div class="kpi"><span class="eyebrow">Anteil fest</span><b>${fixq == null ? "–" : fixq.toFixed(0) + " %"}</b></div><div class="kpi"><span class="eyebrow">Sparquote</span><b>${quote == null ? "–" : quote.toFixed(1).replace(".", ",") + " %"}</b></div></div>
+    <div class="kpis"><div class="kpi"><span class="eyebrow">Feste Ausgaben</span><b>${fE(s.fix)}</b></div><div class="kpi"><span class="eyebrow">Laufende Ausgaben</span><b>${fE(s.var)}</b></div><div class="kpi"><span class="eyebrow">Anteil fest</span><b>${fixq == null ? "–" : fixq.toFixed(0) + " %"}</b></div><div class="kpi"><span class="eyebrow">Sparquote netto</span><b>${quote == null ? "–" : quote.toFixed(1).replace(".", ",") + " %"}</b></div></div>
     ${block("Ausgaben nach Kategorie", ["var", "fix"], s.out)}${block("Einnahmen", ["in"], s.in)}${block("Rücklagen", ["save"], s.save)}
     <div class="panel stack"><h3>Vergleich</h3><div class="tw"><table class="t"><tr><th></th><th class="r">${MS[+st.month.slice(5) - 1]}</th><th class="r">Vormonat</th><th class="r">±</th><th class="r">Vorjahr</th><th class="r">±</th></tr>${cmp}</table></div></div>
     <div class="panel stack"><h3>Vorschau feste Posten</h3><div class="tw"><table class="t"><tr><th></th><th class="r">Einnahmen</th><th class="r">Ausgaben</th><th class="r">Rücklagen</th><th class="r">Bleibt</th></tr>${prev}</table></div>
@@ -365,11 +372,22 @@ function viewAuswertung() {
       ${rare.length ? `<div class="tw"><table class="t"><tr><th>Nicht monatlich</th><th>Rhythmus</th><th class="r">Betrag</th><th class="r">je Monat</th></tr>${rare.map((r) => `<tr><td>${esc(r.name || catName(r.catId))}</td><td>${RH[r.rhythm]}</td><td class="r">${fE(recBase(r, today()))}</td><td class="r">${fE(per(r))}</td></tr>`).join("")}</table></div>` : ""}</div></div>`;
 }
 
+/* ---------- Reiter: Rücklagen ---------- */
+function viewRuecklagen() {
+  const ps = pots().map((c) => ({ c, x: potState(c.id) })), tot = ps.reduce((a, p) => a + p.x.bal, 0);
+  return `<div class="stack"><div class="row between"><h2>Rücklagen</h2><b class="${tot < 0 ? "neg" : "sav"}" style="font-size:1.2rem">${fE(tot)}</b></div>
+    <p class="hint">Jede Rücklage ist ein Topf. Einzahlungen buchst du als Rücklage, einzeln oder als festen Posten. Bezahlst du eine Ausgabe aus dem Topf, wählst du bei der Ausgabe „Aus Rücklage bezahlen“.</p>
+    ${ps.map(({ c, x }) => `<div class="panel stack"><div class="row between"><h3>${esc(c.name)}</h3><b class="${x.bal < 0 ? "neg" : "sav"}" style="font-size:1.15rem;font-variant-numeric:tabular-nums">${fE(x.bal)}</b></div>
+      <div class="small muted">Anfangsbestand ${fE(x.open)} · eingezahlt ${fE(x.inn)} · für Ausgaben entnommen ${fE(x.paid)}${x.back ? " · aufgelöst " + fE(x.back) : ""}</div>
+      <div class="row"><button class="ghost" data-act="pot-open" data-id="${c.id}">${st.openPot === c.id ? "Bewegungen ausblenden" : "Bewegungen"}</button><button class="ghost" data-act="pot-back" data-id="${c.id}">Auflösen</button><button class="link" data-act="cat-edit" data-id="${c.id}">Anfangsbestand ändern</button></div>
+      ${st.openPot === c.id ? `<div>${potMoves(c.id).map((e) => { const plus = e.kind === "save", a = plus ? e.amount : e.kind === "back" ? e.amount : e.fromPot, act = e.tx ? `data-act="tx-edit" data-id="${e.tx.id}"` : `data-act="occ-edit" data-id="${e.rec.id}" data-d="${e.date}"`; return `<div class="tx" ${act} style="grid-template-columns:74px minmax(0,1fr) auto"><span class="muted small">${fDate(e.date)}</span><span><b>${plus ? "Einzahlung" : e.kind === "back" ? "Aufgelöst" : esc(catName(e.catId))}</b>${e.rec ? ' <span class="muted small">↻</span>' : ""}</span><span class="a ${plus ? "pos" : "neg"}">${plus ? "+" : "−"} ${fE(a)}</span>${e.note ? `<span class="n small muted">${esc(e.note)}</span>` : ""}</div>`; }).join("") || '<span class="muted small">Noch keine Bewegungen.</span>'}</div>` : ""}</div>`).join("") || '<div class="empty">Noch keine Rücklage angelegt. Lege unter „Kategorien“ eine Kategorie der Art „Rücklagen“ an.</div>'}</div>`;
+}
+
 /* ---------- Reiter: Jahr ---------- */
 function yearData(y) {
   const months = Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, "0")}`), per = months.map((m) => booked(m + "-01", mEnd(m)));
   const all = per.flat(), catRows = [];
-  for (const k of Object.keys(KINDS)) { const ids = [...new Set(all.filter((e) => e.kind === k).map((e) => e.catId))].sort((a, b) => catName(a).localeCompare(catName(b), "de")); catRows.push({ kind: k, rows: ids.map((id) => ({ id, name: catName(id), m: per.map((l) => l.filter((e) => e.catId === id).reduce((a, e) => a + e.amount, 0)) })) }); }
+  for (const k of Object.keys(KINDS)) { const ids = [...new Set(all.filter((e) => e.kind === k).map((e) => e.catId))].sort((a, b) => catName(a).localeCompare(catName(b), "de")); catRows.push({ kind: k, rows: ids.map((id) => ({ id, name: catName(id), m: per.map((l) => l.filter((e) => e.catId === id && e.kind === k).reduce((a, e) => a + e.amount, 0)) })) }); }
   return { months, per, sums: per.map(sums), total: sums(all), all, catRows };
 }
 function viewJahr() {
@@ -402,7 +420,7 @@ function viewPosten() {
   const t = today();
   const sec = (k) => { const rs = db.recs.filter((r) => kindOf(r.catId) === k || (k === "fix" && kindOf(r.catId) === "var")); if (!rs.length) return "";
     return `<div class="panel"><div class="row between"><h3>${k === "fix" ? "Ausgaben" : KINDS[k]}</h3><b>${fE(rs.filter((r) => !r.end || r.end >= t).reduce((a, r) => a + recBase(r, t) / r.rhythm, 0))} <span class="muted small">je Monat</span></b></div>
-      ${rs.map((r) => { const nx = recDates(r, t, "2999-12-31")[0]; return `<div class="tx" data-act="rec-edit" data-id="${r.id}" style="grid-template-columns:minmax(0,1fr) auto"><span><b>${esc(r.name || catName(r.catId))}</b>${r.name ? ` <span class="muted small">${esc(catName(r.catId))}</span>` : ""}</span><span class="a ${cls(kindOf(r.catId))}">${fE(recBase(r, t))}</span><span class="small muted" style="grid-column:1/-1">${RH[r.rhythm]} · ${r.end && r.end < t ? "beendet am " + fDate(r.end) : nx ? "nächste Fälligkeit " + fDate(nx) : "keine weitere Fälligkeit"}</span></div>`; }).join("")}</div>`; };
+      ${rs.map((r) => { const nx = recDates(r, t, "2999-12-31")[0]; return `<div class="tx" data-act="rec-edit" data-id="${r.id}" style="grid-template-columns:minmax(0,1fr) auto"><span><b>${esc(r.name || catName(r.catId))}</b>${r.name ? ` <span class="muted small">${esc(catName(r.catId))}</span>` : ""}</span><span class="a ${cls(kindOf(r.catId))}">${fE(recBase(r, t))}</span><span class="small muted" style="grid-column:1/-1">${RH[r.rhythm]}${r.pot && cat(r.pot) ? " · aus " + esc(catName(r.pot)) : ""} · ${r.end && r.end < t ? "beendet am " + fDate(r.end) : nx ? "nächste Fälligkeit " + fDate(nx) : "keine weitere Fälligkeit"}</span></div>`; }).join("")}</div>`; };
   return `<div class="stack"><div class="row between"><h2>Feste Posten</h2><button data-act="rec-new">+ Fester Posten</button></div>
     <p class="hint">Feste Posten sind wiederkehrende Einnahmen, Ausgaben und Rücklagen. Die App bucht sie am Fälligkeitstag von selbst. Einen einzelnen Termin änderst du, indem du ihn in der Monatsliste antippst.</p>
     ${sec("in")}${sec("fix")}${sec("save")}${db.recs.length ? "" : '<div class="empty">Noch kein fester Posten angelegt.</div>'}</div>`;
@@ -414,6 +432,7 @@ function formRec() {
     <div class="grid2">${fld("Kategorie", `<select data-p="catId" data-re="1">${catOptions(kinds, d.catId, "", true)}</select>${d.catId === OWN ? `<input data-p="catOwn" value="${esc(d.catOwn || "")}" placeholder="Name der Kategorie" style="margin-top:6px">` : ""}`)}${fld("Bezeichnung (freiwillig)", inp("name", d.name, { ph: "z. B. Anbieter" }))}
       ${fld("Rhythmus", `<select data-p="rhythm" data-t="i">${Object.entries(RH).map(([k, l]) => `<option value="${k}" ${+k === d.rhythm ? "selected" : ""}>${l}</option>`).join("")}</select>`)}<span></span>
       ${fld("Erste Fälligkeit", inp("start", d.start, { type: "date" }))}${fld("Ende (leer = läuft weiter)", inp("end", d.end, { type: "date" }))}</div>
+    ${d.type === "out" ? fld("Aus Rücklage bezahlen", `<select data-p="pot">${potOptions(d.pot)}</select>`) : ""}
     <div class="eyebrow">Betrag</div>
     ${d.amounts.map((a, i) => `<div class="row" style="flex-wrap:nowrap">${i ? `<label class="f" style="flex:1">Gilt ab${inp(`amounts.${i}.from`, a.from, { type: "date" })}</label>` : ""}<label class="f" style="flex:1">${i ? "Neuer Betrag" : "Betrag in €"}${inp(`amounts.${i}.amount`, a.amount, { t: "n", ph: "0,00" })}</label>${i ? `<button class="link" data-act="amt-del" data-i="${i}" aria-label="Änderung entfernen" style="align-self:end">×</button>` : ""}</div>`).join("")}
     <div><button class="ghost" data-act="amt-add">+ Betragsänderung ab Datum</button></div>
@@ -432,14 +451,18 @@ function formOcc() {
 function formTx() {
   const d = st.form.d, kinds = typeKinds(d.type);
   if (!catOk(d.catId, kinds)) d.catId = db.cats.find((c) => kinds.includes(c.kind))?.id || "";
+  if (d.back) return `<div class="panel stack"><div><div class="eyebrow">Rücklage auflösen</div><h2>${esc(catName(d.catId))}</h2><div class="small muted">Stand ${fE(potState(d.catId).bal)}</div></div>
+    <div class="grid2">${fld("Betrag in €", inp("amount", d.amount, { t: "n" }))}${fld("Datum", inp("date", d.date, { type: "date" }))}${fld("Notiz", inp("note", d.note), "full")}</div>
+    <p class="hint">Der Betrag verlässt die Rücklage und steht im Monat wieder als „Übrig“ zur Verfügung.</p>
+    <div class="row"><button data-act="tx-save">Speichern</button><button class="link" data-act="form-no">Abbrechen</button>${st.form.isNew ? "" : delBtn("tx-del", d.id, "Buchung löschen")}</div></div>`;
   return `<div class="panel stack"><h2>Buchung ändern</h2>${typeChips("f-type", d.type)}
-    <div class="grid2">${fld("Betrag in €", inp("amount", d.amount, { t: "n" }))}${fld("Kategorie", `<select data-p="catId" data-re="1">${catOptions(kinds, d.catId, "", true)}</select>${d.catId === OWN ? `<input data-p="catOwn" value="${esc(d.catOwn || "")}" placeholder="Name der Kategorie" style="margin-top:6px">` : ""}`)}${fld("Datum", inp("date", d.date, { type: "date" }))}${fld("Notiz", inp("note", d.note))}</div>
+    <div class="grid2">${fld("Betrag in €", inp("amount", d.amount, { t: "n" }))}${fld("Kategorie", `<select data-p="catId" data-re="1">${catOptions(kinds, d.catId, "", true)}</select>${d.catId === OWN ? `<input data-p="catOwn" value="${esc(d.catOwn || "")}" placeholder="Name der Kategorie" style="margin-top:6px">` : ""}`)}${fld("Datum", inp("date", d.date, { type: "date" }))}${fld("Notiz", inp("note", d.note))}${d.type === "out" ? `${fld("Aus Rücklage bezahlen", `<select data-p="pot" data-re="1">${potOptions(d.pot)}</select>`)}${d.pot ? fld("Davon aus Rücklage (leer = ganzer Betrag)", inp("potAmt", d.potAmt, { t: "n" })) : ""}` : ""}</div>
     <div class="row"><button data-act="tx-save">Speichern</button><button class="link" data-act="form-no">Abbrechen</button>${delBtn("tx-del", d.id, "Buchung löschen")}</div></div>`;
 }
 
 /* ---------- Reiter: Kategorien ---------- */
 function viewKategorien() {
-  const used = new Set([...db.tx.map((t) => t.catId), ...db.recs.map((r) => r.catId)]);
+  const used = new Set([...db.tx.map((t) => t.catId), ...db.recs.map((r) => r.catId), ...db.tx.map((t) => t.pot), ...db.recs.map((r) => r.pot)]);
   return `<div class="stack"><div class="row between"><h2>Kategorien</h2><button data-act="cat-new">+ Kategorie</button></div>
     ${Object.entries(KINDS).map(([k, l]) => `<div class="panel"><h3 style="margin-bottom:6px">${l}</h3>${[...new Set(db.cats.filter((c) => c.kind === k).map((c) => c.group))].map((g) => `${g !== l ? `<div class="eyebrow" style="margin-top:10px">${esc(g)}</div>` : ""}${db.cats.filter((c) => c.kind === k && c.group === g).map((c) => `<div class="row between" style="border-bottom:1px solid var(--line);padding:4px 0"><span>${esc(c.name)}${c.budget ? ` <span class="muted small">Budget ${fE(c.budget)}</span>` : ""}</span><span class="row" style="gap:2px"><button class="link" data-act="cat-edit" data-id="${c.id}">Ändern</button>${used.has(c.id) ? "" : delBtn("cat-del", c.id)}</span></div>`).join("")}`).join("")}</div>`).join("")}
     <p class="hint">Kategorien mit Buchungen oder festen Posten lassen sich umbenennen, aber nicht löschen. Die Gruppe dient nur zum Sortieren der Auswahl.</p></div>`;
@@ -449,7 +472,7 @@ function formCat() {
   return `<div class="panel stack"><h2>${st.form.isNew ? "Neue Kategorie" : "Kategorie ändern"}</h2>
     <div class="grid2">${fld("Art", `<select data-p="kind" data-re="1">${Object.entries(KINDS).map(([k, l]) => `<option value="${k}" ${k === d.kind ? "selected" : ""}>${l}</option>`).join("")}</select>`)}${fld("Name", inp("name", d.name))}
       ${fld("Gruppe", `<select data-p="group" data-re="1">${groups.map((g) => `<option ${g === d.group ? "selected" : ""}>${esc(g)}</option>`).join("")}<option value="${OWN}" ${d.group === OWN ? "selected" : ""}>Eigene Gruppe …</option></select>${d.group === OWN ? `<input data-p="groupOwn" value="${esc(d.groupOwn || "")}" placeholder="Name der Gruppe" style="margin-top:6px">` : ""}`)}
-      ${d.kind === "in" ? "" : fld("Budget je Monat (freiwillig)", inp("budget", d.budget, { t: "n", ph: "0,00" }))}</div>
+      ${d.kind === "in" || d.kind === "save" ? "" : fld("Budget je Monat (freiwillig)", inp("budget", d.budget, { t: "n", ph: "0,00" }))}${d.kind === "save" ? fld("Anfangsbestand (bereits angespart)", inp("opening", d.opening, { t: "n", ph: "0,00" })) : ""}</div>
     <div class="row"><button data-act="cat-save">Speichern</button><button class="link" data-act="form-no">Abbrechen</button></div></div>`;
 }
 
@@ -466,7 +489,7 @@ function viewHinweise() {
       <li><b>Eigene Kategorien:</b> In jeder Kategorie-Auswahl steht unten „Eigene Kategorie …“. Der Name wird dauerhaft angelegt, bei festen Posten unter den festen Ausgaben, sonst unter den laufenden. Gruppe und Budget änderst du unter „Kategorien“.</li>
       <li><b>Schnell buchen:</b> Alles andere trägst du auf der Seite „Monat“ ein: Betrag, Kategorie, Buchen.</li>
       <li><b>Einzelnen Termin ändern:</b> Einen festen Posten in der Monatsliste antippen, dann den Betrag nur für diesen Termin ändern oder ihn ausfallen lassen.</li>
-      <li><b>Rücklagen:</b> Sparen zählt nicht als Ausgabe. Die App zeigt getrennt, was verbraucht, was zurückgelegt und was übrig ist.</li>
+      <li><b>Rücklagen:</b> Sparen zählt nicht als Ausgabe. Jede Rücklage ist ein Topf mit Stand, zu sehen unter „Rücklagen“. Bezahlst du etwas aus einem Topf, etwa die Inspektion aus der „Rücklage Auto“, wählst du bei der Ausgabe „Aus Rücklage bezahlen“. Die Ausgabe zählt dann in ihrer Kategorie, das „Übrig“ des Monats bleibt aber unberührt, und der Topf sinkt.</li>
       <li><b>Budget:</b> Unter „Kategorien“ kannst du je Kategorie ein Monatsbudget hinterlegen. Die Auswertung zeigt dazu eine Ampel: grün, ab 80 Prozent gelb, ab 100 Prozent rot.</li>
       <li><b>Zahlen:</b> Gezählt wird, was bis heute fällig war. Was im laufenden Monat noch kommt, steht unter „Noch fällig“.</li></ul></div></div>`;
 }
@@ -491,19 +514,21 @@ async function pdfTable(title, sub, blocks) {
   }
   return doc.save();
 }
-const sgn = (e) => (e.kind === "in" ? "" : "-") + fE(e.amount);
+const sgn = (e) => (e.kind === "in" || e.kind === "back" ? "" : "-") + fE(e.amount);
 async function doExport(scope, fmt) {
   const isM = scope === "m", name = isM ? `Haushaltsbuch_${st.month}` : `Haushaltsbuch_${st.year}`, title = isM ? `Haushaltsbuch ${mName(st.month)}` : `Haushaltsbuch ${st.year}`;
   const yd = isM ? null : yearData(st.year), list = isM ? booked(st.month + "-01", mEnd(st.month)) : yd.all, s = sums(list);
   const asc = [...list].sort((a, b) => a.date.localeCompare(b.date));
   const catSum = Object.keys(KINDS).flatMap((k) => byCat(list, [k]).map(([id, a]) => ({ kind: k, id, a })));
   if (fmt === "xlsx") {
-    const sections = [{ title: "Buchungen", data: { cols: [{ h: "Datum", wch: 12 }, { h: "Art", wch: 20 }, { h: "Gruppe", wch: 20 }, { h: "Kategorie", wch: 26 }, { h: "Notiz", wch: 30 }, { h: "Betrag", eur: true, wch: 14 }, { h: "Fester Posten", wch: 14 }], rows: asc.map((e) => [fDate(e.date), KINDS[e.kind], cat(e.catId)?.group || "", catName(e.catId), e.note, signed(e), e.rec ? "ja" : ""]) } },
-      { title: "Kategorien", data: { cols: [{ h: "Art", wch: 20 }, { h: "Gruppe", wch: 20 }, { h: "Kategorie", wch: 26 }, { h: "Summe", eur: true, wch: 14 }], rows: [...catSum.map((c) => [KINDS[c.kind], cat(c.id)?.group || "", catName(c.id), c.a]), ["", "", "Einnahmen", s.in], ["", "", "Ausgaben", s.out], ["", "", "Rücklagen", s.save], ["", "", "Übrig", s.rest]] } }];
+    const sections = [{ title: "Buchungen", data: { cols: [{ h: "Datum", wch: 12 }, { h: "Art", wch: 20 }, { h: "Gruppe", wch: 20 }, { h: "Kategorie", wch: 26 }, { h: "Notiz", wch: 30 }, { h: "Betrag", eur: true, wch: 14 }, { h: "Fester Posten", wch: 14 }, { h: "Aus Rücklage", wch: 20 }, { h: "Betrag aus Rücklage", eur: true, wch: 18 }], rows: asc.map((e) => [fDate(e.date), kindName(e.kind), cat(e.catId)?.group || "", catName(e.catId), e.note, signed(e), e.rec ? "ja" : "", e.pot ? catName(e.pot) : "", e.pot ? e.fromPot : ""]) } },
+      { title: "Kategorien", data: { cols: [{ h: "Art", wch: 20 }, { h: "Gruppe", wch: 20 }, { h: "Kategorie", wch: 26 }, { h: "Summe", eur: true, wch: 14 }], rows: [...catSum.map((c) => [KINDS[c.kind], cat(c.id)?.group || "", catName(c.id), c.a]), ["", "", "Einnahmen", s.in], ["", "", "Ausgaben", s.out], ["", "", "davon aus Rücklagen bezahlt", s.pot], ["", "", "In Rücklagen eingezahlt", s.save], ["", "", "Rücklagen aufgelöst", s.back], ["", "", "Übrig", s.rest]] } },
+      { title: "Rücklagen", data: { cols: [{ h: "Rücklage", wch: 24 }, { h: "Anfangsbestand", eur: true, wch: 16 }, { h: "Eingezahlt", eur: true, wch: 14 }, { h: "Für Ausgaben", eur: true, wch: 14 }, { h: "Aufgelöst", eur: true, wch: 14 }, { h: "Stand heute", eur: true, wch: 14 }], rows: pots().map((c) => { const x = potState(c.id); return [c.name, x.open, x.inn, x.paid, x.back, x.bal]; }) } }];
     if (!isM) sections.push({ title: "Monate", data: { cols: [{ h: "Monat", wch: 14 }, { h: "Einnahmen", eur: true, wch: 14 }, { h: "Ausgaben", eur: true, wch: 14 }, { h: "Rücklagen", eur: true, wch: 14 }, { h: "Übrig", eur: true, wch: 14 }], rows: yd.sums.map((x, i) => [MON[i], x.in, x.out, x.save, x.rest]) } });
     return offer(name + ".xlsx", await makeXlsxOwn({ sections }));
   }
-  const blocks = [{ title: "Übersicht", cols: ["", "Betrag"], widths: [0.7, 0.3], right: [0, 1], rows: [["Einnahmen", fE(s.in)], ["Feste Ausgaben", fE(s.fix)], ["Laufende Ausgaben", fE(s.var)], ["Rücklagen", fE(s.save)], { bold: 1, cells: ["Übrig", fE(s.rest)] }] }];
+  const blocks = [{ title: "Übersicht", cols: ["", "Betrag"], widths: [0.7, 0.3], right: [0, 1], rows: [["Einnahmen", fE(s.in)], ["Feste Ausgaben", fE(s.fix)], ["Laufende Ausgaben", fE(s.var)], ["davon aus Rücklagen bezahlt", fE(s.pot)], ["In Rücklagen eingezahlt", fE(s.save)], ["Rücklagen aufgelöst", fE(s.back)], { bold: 1, cells: ["Übrig", fE(s.rest)] }] }];
+  blocks.push({ title: "Rücklagen (Stand heute)", cols: ["Rücklage", "Eingezahlt", "Entnommen", "Stand"], widths: [0.4, 0.2, 0.2, 0.2], right: [0, 1, 1, 1], rows: pots().map((c) => { const x = potState(c.id); return [c.name, fE(x.open + x.inn), fE(x.paid + x.back), fE(x.bal)]; }) });
   if (!isM) blocks.push({ title: "Monate", cols: ["Monat", "Einnahmen", "Ausgaben", "Rücklagen", "Übrig"], widths: [0.24, 0.19, 0.19, 0.19, 0.19], right: [0, 1, 1, 1, 1], rows: yd.sums.map((x, i) => [MON[i], fE(x.in), fE(x.out), fE(x.save), fE(x.rest)]) });
   for (const k of Object.keys(KINDS)) { const rows = catSum.filter((c) => c.kind === k), tot = rows.reduce((a, c) => a + c.a, 0); if (rows.length) blocks.push({ title: KINDS[k], cols: ["Kategorie", "Gruppe", "Betrag", "Anteil"], widths: [0.4, 0.3, 0.18, 0.12], right: [0, 0, 1, 1], rows: [...rows.map((c) => [catName(c.id), cat(c.id)?.group || "", fE(c.a), tot ? ((c.a / tot) * 100).toFixed(1).replace(".", ",") + " %" : ""]), { bold: 1, cells: ["Summe", "", fE(tot), ""] }] }); }
   if (isM) blocks.push({ title: "Buchungen", cols: ["Datum", "Kategorie", "Notiz", "Betrag"], widths: [0.14, 0.3, 0.38, 0.18], right: [0, 0, 0, 1], rows: asc.map((e) => [fDate(e.date), catName(e.catId), e.note, sgn(e)]) });
@@ -512,7 +537,7 @@ async function doExport(scope, fmt) {
 
 /* ---------- Zeichnen ---------- */
 function render() {
-  const v = st.form ? ({ tx: formTx, rec: formRec, occ: formOcc, cat: formCat }[st.form.type])() : ({ monat: viewMonat, auswertung: viewAuswertung, jahr: viewJahr, suche: viewSuche, posten: viewPosten, kategorien: viewKategorien, hinweise: viewHinweise }[st.tab])();
+  const v = st.form ? ({ tx: formTx, rec: formRec, occ: formOcc, cat: formCat }[st.form.type])() : ({ monat: viewMonat, auswertung: viewAuswertung, ruecklagen: viewRuecklagen, jahr: viewJahr, suche: viewSuche, posten: viewPosten, kategorien: viewKategorien, hinweise: viewHinweise }[st.tab])();
   document.getElementById("app").innerHTML = `<div class="tabs" role="tablist">${TABS.map(([k, l]) => `<button role="tab" aria-selected="${st.tab === k}" data-act="tab" data-tab="${k}">${l}</button>`).join("")}</div>${v}`;
   document.getElementById("ver").textContent = "Haushaltsbuch " + APP_VERSION;
 }
@@ -526,10 +551,12 @@ const ACT = {
   "m-mv"(b) { st.month = mAdd(st.month, +b.dataset.n); st.open = null; render(); },
   "y-mv"(b) { st.year = String(+st.year + +b.dataset.n); render(); },
   "q-type"(b) { st.q.type = b.dataset.v; st.q.catId = ""; render(); },
-  "q-book"() { const q = st.q, a = num(q.amount); if (a == null || a <= 0) return toast("Bitte einen Betrag eingeben."); if (!q.date) return toast("Bitte ein Datum angeben."); if (q.catId === OWN) { const id = ownCat(q.catOwn, q.type === "out" ? "var" : q.type); if (!id) return toast("Bitte einen Namen für die Kategorie eingeben."); q.catId = id; q.catOwn = ""; } if (!cat(q.catId)) return toast("Bitte eine Kategorie wählen."); db.tx.push({ id: uid(), date: q.date, catId: q.catId, amount: a, note: q.note.trim() }); st.lastCat[q.type] = q.catId; save(); st.month = q.date.slice(0, 7); toast(`${catName(q.catId)}: ${fE(a)} gebucht`); q.amount = ""; q.note = ""; render(); },
+  "q-book"() { const q = st.q, a = num(q.amount); if (a == null || a <= 0) return toast("Bitte einen Betrag eingeben."); if (!q.date) return toast("Bitte ein Datum angeben."); if (q.catId === OWN) { const id = ownCat(q.catOwn, q.type === "out" ? "var" : q.type); if (!id) return toast("Bitte einen Namen für die Kategorie eingeben."); q.catId = id; q.catOwn = ""; } if (!cat(q.catId)) return toast("Bitte eine Kategorie wählen."); { const t = { id: uid(), date: q.date, catId: q.catId, amount: a, note: q.note.trim() }; if (q.type === "out" && q.pot && cat(q.pot)) { t.pot = q.pot; const pa = num(q.potAmt); if (pa != null && pa > 0 && pa < a) t.potAmt = pa; } db.tx.push(t); } q.pot = ""; q.potAmt = ""; st.lastCat[q.type] = q.catId; save(); st.month = q.date.slice(0, 7); toast(`${catName(q.catId)}: ${fE(a)} gebucht`); q.amount = ""; q.note = ""; render(); },
   "tx-edit"(b) { const t = clone(db.tx.find((x) => x.id === b.dataset.id)); t.type = typeOfKind(kindOf(t.catId)); openForm("tx", t); },
-  "tx-save"() { const d = st.form.d; if (d.amount == null || d.amount <= 0) return toast("Bitte einen Betrag eingeben."); if (!d.date) return toast("Bitte ein Datum angeben."); if (d.catId === OWN) { const id = ownCat(d.catOwn, d.type === "out" ? "var" : d.type); if (!id) return toast("Bitte einen Namen für die Kategorie eingeben."); d.catId = id; } const i = db.tx.findIndex((x) => x.id === d.id); db.tx[i] = { id: d.id, date: d.date, catId: d.catId, amount: d.amount, note: (d.note || "").trim() }; save(); closeForm(); toast("Buchung gespeichert"); },
+  "tx-save"() { const d = st.form.d; if (d.amount == null || d.amount <= 0) return toast("Bitte einen Betrag eingeben."); if (!d.date) return toast("Bitte ein Datum angeben."); if (d.catId === OWN) { const id = ownCat(d.catOwn, d.type === "out" ? "var" : d.type); if (!id) return toast("Bitte einen Namen für die Kategorie eingeben."); d.catId = id; } const t = { id: d.id, date: d.date, catId: d.catId, amount: d.amount, note: (d.note || "").trim() }; if (d.back) t.back = true; else if (d.type === "out" && d.pot && cat(d.pot)) { t.pot = d.pot; if (d.potAmt != null && d.potAmt > 0 && d.potAmt < d.amount) t.potAmt = d.potAmt; } const i = db.tx.findIndex((x) => x.id === d.id); if (i >= 0) db.tx[i] = t; else db.tx.push(t); save(); closeForm(); toast(d.back ? "Rücklage aufgelöst" : "Buchung gespeichert"); },
   "tx-del"(b) { if (!sure("tx-del", b.dataset.id)) return; db.tx = db.tx.filter((x) => x.id !== b.dataset.id); save(); closeForm(); toast("Buchung gelöscht"); },
+  "pot-open"(b) { st.openPot = st.openPot === b.dataset.id ? null : b.dataset.id; render(); },
+  "pot-back"(b) { openForm("tx", { id: uid(), back: true, catId: b.dataset.id, amount: null, date: today(), note: "", type: "save" }, { isNew: true }); },
   "f-type"(b) { st.form.d.type = b.dataset.v; st.form.d.catId = ""; render(); },
   "cat-open"(b) { st.open = st.open === b.dataset.id ? null : b.dataset.id; render(); },
   /* Feste Posten */
@@ -538,7 +565,7 @@ const ACT = {
   "amt-add"() { st.form.d.amounts.push({ from: today(), amount: null }); render(); },
   "over-del"(b) { delete st.form.d.over[b.dataset.k]; render(); },
   "amt-del"(b) { st.form.d.amounts.splice(+b.dataset.i, 1); render(); },
-  "rec-save"() { const d = st.form.d; if (d.catId === OWN) { const id = ownCat(d.catOwn, d.type === "out" ? "fix" : d.type); if (!id) return toast("Bitte einen Namen für die Kategorie eingeben."); d.catId = id; } if (!d.start) return toast("Bitte die erste Fälligkeit angeben."); if (d.end && d.end < d.start) return toast("Das Ende liegt vor der ersten Fälligkeit."); if (d.amounts.some((a) => a.amount == null || a.amount < 0)) return toast("Bitte jeden Betrag ausfüllen."); if (d.amounts.slice(1).some((a) => !a.from)) return toast("Bitte bei jeder Betragsänderung das Datum angeben."); d.amounts[0].from = d.start < (d.amounts[1]?.from || "9999") ? d.start : "0000-01-01"; const r = { id: d.id, catId: d.catId, name: (d.name || "").trim(), rhythm: +d.rhythm, start: d.start, end: d.end || "", amounts: d.amounts, over: d.over || {} }; const i = db.recs.findIndex((x) => x.id === r.id); if (i >= 0) db.recs[i] = r; else db.recs.push(r); save(); st.tab = "posten"; closeForm(); toast("Fester Posten gespeichert"); },
+  "rec-save"() { const d = st.form.d; if (d.catId === OWN) { const id = ownCat(d.catOwn, d.type === "out" ? "fix" : d.type); if (!id) return toast("Bitte einen Namen für die Kategorie eingeben."); d.catId = id; } if (!d.start) return toast("Bitte die erste Fälligkeit angeben."); if (d.end && d.end < d.start) return toast("Das Ende liegt vor der ersten Fälligkeit."); if (d.amounts.some((a) => a.amount == null || a.amount < 0)) return toast("Bitte jeden Betrag ausfüllen."); if (d.amounts.slice(1).some((a) => !a.from)) return toast("Bitte bei jeder Betragsänderung das Datum angeben."); d.amounts[0].from = d.start < (d.amounts[1]?.from || "9999") ? d.start : "0000-01-01"; const r = { id: d.id, catId: d.catId, name: (d.name || "").trim(), rhythm: +d.rhythm, start: d.start, end: d.end || "", amounts: d.amounts, over: d.over || {} }; if (d.type === "out" && d.pot && cat(d.pot)) r.pot = d.pot; const i = db.recs.findIndex((x) => x.id === r.id); if (i >= 0) db.recs[i] = r; else db.recs.push(r); save(); st.tab = "posten"; closeForm(); toast("Fester Posten gespeichert"); },
   "rec-del"(b) { if (!sure("rec-del", b.dataset.id)) return; db.recs = db.recs.filter((x) => x.id !== b.dataset.id); save(); closeForm(); toast("Fester Posten gelöscht"); },
   "occ-edit"(b) { const r = db.recs.find((x) => x.id === b.dataset.id), d = b.dataset.d, o = r.over?.[d]; openForm("occ", { amount: o ? o.amount : recBase(r, d) }, { recId: r.id, date: d }); },
   "occ-save"() { const f = st.form, r = db.recs.find((x) => x.id === f.recId); if (f.d.amount == null || f.d.amount < 0) return toast("Bitte einen Betrag eingeben."); r.over = r.over || {}; if (f.d.amount === recBase(r, f.date)) delete r.over[f.date]; else r.over[f.date] = { amount: f.d.amount }; save(); closeForm(); toast("Termin gespeichert"); },
@@ -547,7 +574,7 @@ const ACT = {
   /* Kategorien */
   "cat-new"() { openForm("cat", { id: uid(), kind: "var", group: "Sonstiges", name: "", budget: null }, { isNew: true }); },
   "cat-edit"(b) { openForm("cat", clone(cat(b.dataset.id))); },
-  "cat-save"() { const d = st.form.d; d.name = (d.name || "").trim(); if (!d.name) return toast("Bitte einen Namen eingeben."); if (d.group === OWN) d.group = (d.groupOwn || "").trim() || "Sonstiges"; delete d.groupOwn; if (d.kind === "in") d.budget = null; const i = db.cats.findIndex((c) => c.id === d.id); if (i >= 0) db.cats[i] = d; else db.cats.push(d); save(); closeForm(); toast("Kategorie gespeichert"); },
+  "cat-save"() { const d = st.form.d; d.name = (d.name || "").trim(); if (!d.name) return toast("Bitte einen Namen eingeben."); if (d.group === OWN) d.group = (d.groupOwn || "").trim() || "Sonstiges"; delete d.groupOwn; if (d.kind === "in" || d.kind === "save") d.budget = null; if (d.kind !== "save") delete d.opening; const i = db.cats.findIndex((c) => c.id === d.id); if (i >= 0) db.cats[i] = d; else db.cats.push(d); save(); closeForm(); toast("Kategorie gespeichert"); },
   "cat-del"(b) { if (!sure("cat-del", b.dataset.id)) return; db.cats = db.cats.filter((c) => c.id !== b.dataset.id); save(); render(); },
   exp(b) { doExport(b.dataset.scope, b.dataset.fmt).catch(() => toast("Die Datei konnte nicht erstellt werden.")); },
   async backup() { db.meta.lastBackup = today(); db.meta.dirtySince = null; save(true); await offer(`Haushaltsbuch_Sicherung_${today()}.json`, JSON.stringify({ app: "Haushaltsbuch", version: APP_VERSION, created: new Date().toISOString(), db })); render(); },
@@ -557,11 +584,11 @@ const app = document.getElementById("app");
 app.addEventListener("click", (e) => { const b = e.target.closest("[data-act]"); if (!b || b.disabled) return; if (b.tagName !== "BUTTON") { const inner = e.target.closest("button, a, input, select, label"); if (inner && inner !== b && b.contains(inner)) return; } const f = ACT[b.dataset.act]; if (f) f(b); });
 function bind(e) {
   const el = e.target;
-  if (el.dataset.q) { const was = st.q.catId; st.q[el.dataset.q] = el.value; if (el.dataset.q === "catId" && (el.value === OWN || was === OWN)) { render(); document.querySelector('[data-q="catOwn"]')?.focus(); } return; }
+  if (el.dataset.q) { const was = st.q.catId; st.q[el.dataset.q] = el.value; if (el.dataset.q === "catId" && (el.value === OWN || was === OWN)) { render(); document.querySelector('[data-q="catOwn"]')?.focus(); } if (el.dataset.q === "pot") render(); return; }
   if (el.dataset.s) { st.s[el.dataset.s] = el.value; if (e.type === "change" || el.dataset.s !== "text") render(); return; }
   if (!el.dataset.p || !st.form) return;
   setP(st.form.d, el.dataset.p, el.dataset.t === "n" ? num(el.value) : el.dataset.t === "i" ? +el.value : el.value);
-  if (e.type === "change" && el.dataset.re) { if (el.dataset.p === "catId" && el.value !== OWN && !("catOwn" in st.form.d)) return; if (el.dataset.p === "kind") st.form.d.group = db.cats.find((c) => c.kind === el.value)?.group || "Sonstiges"; render(); }
+  if (e.type === "change" && el.dataset.re) { if (el.dataset.p === "pot") st.form.d.potAmt = null; if (el.dataset.p === "catId" && el.value !== OWN && !("catOwn" in st.form.d)) return; if (el.dataset.p === "kind") st.form.d.group = db.cats.find((c) => c.kind === el.value)?.group || "Sonstiges"; render(); }
 }
 app.addEventListener("input", (e) => { if (e.target.dataset.s && e.target.dataset.s !== "text") return; if (e.target.dataset.s === "text") { st.s.text = e.target.value; return; } bind(e); });
 app.addEventListener("change", (e) => {
