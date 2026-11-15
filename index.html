@@ -204,7 +204,7 @@ async function webDownload(filename, data, note) {
 <script>
 (() => {
 "use strict";
-const APP_VERSION = "web-v1";
+const APP_VERSION = "web-v2";
 const KEY = "haushaltsbuch.v1", UNDO = "haushaltsbuch.rueckgaengig";
 const MON = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"], MS = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
 const KINDS = { in: "Einnahmen", fix: "Feste Ausgaben", var: "Laufende Ausgaben", save: "Rücklagen" };
@@ -212,7 +212,7 @@ const RH = { 1: "monatlich", 3: "vierteljährlich", 6: "halbjährlich", 12: "jä
 const OWN = "__own";
 const DEF = {
   in: { Einnahmen: ["Gehalt", "Rente", "Zusatzrente", "Betriebsrente", "Zinsen", "Dividenden", "Mieteinnahmen", "Honorare", "Steuererstattung", "Sonstige Erstattungen", "Geschenke (erhalten)", "Sonstige Einnahmen"] },
-  fix: { Wohnen: ["Miete", "Nebenkosten", "Grundsteuer", "Strom", "Gas", "Wasser", "Müllgebühren"], Kommunikation: ["Internet", "Handy", "Festnetz", "Rundfunkbeitrag"], Versicherungen: ["Krankenversicherung", "Haftpflicht", "Hausrat", "Rechtsschutz", "Kfz-Versicherung", "Unfallversicherung", "Lebensversicherung"], Auto: ["Kfz-Steuer", "Leasing oder Kredit"], Abos: ["Streaming", "Zeitung und Zeitschriften", "Software"], Mitgliedschaften: ["Fitnessstudio", "Vereine"] },
+  fix: { Wohnen: ["Miete", "Nebenkosten", "Grundsteuer", "Strom", "Gas", "Wasser", "Müllgebühren"], Kommunikation: ["Internet", "Handy", "Festnetz", "Rundfunkbeitrag"], Versicherungen: ["Krankenversicherung", "Haftpflicht", "Hausrat", "Rechtsschutz", "Kfz-Versicherung", "Unfallversicherung", "Lebensversicherung"], Auto: ["Kfz-Steuer", "Leasing"], Kredite: ["Ratenkredit", "Immobilienkredit", "Autokredit"], Abos: ["Streaming", "Zeitung und Zeitschriften", "Software"], Mitgliedschaften: ["Fitnessstudio", "Vereine"] },
   var: { "Täglicher Bedarf": ["Lebensmittel", "Getränke", "Drogerie", "Kleidung", "Schuhe", "Friseur"], Gesundheit: ["Apotheke", "Arzt"], "Mobilität": ["Tanken", "Auto-Werkstatt", "Auto-Wäsche", "Parken", "Bus und Bahn", "Taxi"], Freizeit: ["Restaurant", "Café", "Freizeit", "Kino und Kultur", "Sport", "Hobby", "Bücher"], Reisen: ["Urlaub", "Ausflüge"], "Haus und Wohnung": ["Möbel", "Haushaltsgeräte", "Elektronik", "Reparaturen", "Garten", "Haushaltswaren"], Sonstiges: ["Geschenke", "Spenden", "Steuern", "Gebühren", "Bargeld ohne Zuordnung", "Sonstiges"] },
   save: { "Rücklagen": ["Sparplan", "Tagesgeld", "Wertpapiere", "Altersvorsorge", "Rücklage Urlaub", "Rücklage Auto"] },
 };
@@ -241,12 +241,25 @@ function toast(msg) { const t = document.getElementById("toast"); t.textContent 
 function emptyDb() {
   const cats = []; let n = 0;
   for (const [kind, groups] of Object.entries(DEF)) for (const [group, names] of Object.entries(groups)) for (const name of names) cats.push({ id: "k" + ++n, kind, group, name, budget: null });
-  return { v: 1, cats, recs: [], tx: [], meta: { lastBackup: null, dirtySince: null } };
+  return { v: 2, cats, recs: [], tx: [], meta: { lastBackup: null, dirtySince: null } };
 }
 let db;
 function load() {
-  try { const d = JSON.parse(localStorage.getItem(KEY)); if (d && Array.isArray(d.tx) && Array.isArray(d.cats)) { db = Object.assign(emptyDb(), d); db.meta = Object.assign({ lastBackup: null, dirtySince: null }, d.meta || {}); return; } } catch {}
+  try { const d = JSON.parse(localStorage.getItem(KEY)); if (d && Array.isArray(d.tx) && Array.isArray(d.cats)) { db = Object.assign(emptyDb(), d); db.meta = Object.assign({ lastBackup: null, dirtySince: null }, d.meta || {}); migrate(); return; } } catch {}
   db = emptyDb();
+}
+/* Übernahme älterer Stände: Buchungen und feste Posten bleiben unverändert, es kommen nur Kategorien dazu */
+function migrate() {
+  if ((db.v || 1) < 2) {
+    const l = db.cats.find((c) => c.kind === "fix" && c.name === "Leasing oder Kredit"); if (l) l.name = "Leasing";
+    for (const name of ["Ratenkredit", "Immobilienkredit", "Autokredit"]) if (!db.cats.some((c) => c.kind === "fix" && c.name === name)) db.cats.push({ id: uid(), kind: "fix", group: "Kredite", name, budget: null });
+    db.v = 2; try { localStorage.setItem(KEY, JSON.stringify(db)); } catch {}
+  }
+}
+function ownCat(name, kind) {
+  name = String(name || "").trim(); if (!name) return null;
+  const ex = db.cats.find((c) => c.kind === kind && c.name.toLowerCase() === name.toLowerCase()); if (ex) return ex.id;
+  const c = { id: uid(), kind, group: kind === "in" ? "Einnahmen" : kind === "save" ? "Rücklagen" : "Eigene", name, budget: null }; db.cats.push(c); return c.id;
 }
 function save(silent) {
   if (!silent && !db.meta.dirtySince) db.meta.dirtySince = today();
@@ -286,11 +299,13 @@ const st = { tab: "monat", form: null, month: today().slice(0, 7), year: today()
 const TABS = [["monat", "Monat"], ["auswertung", "Auswertung"], ["jahr", "Jahr"], ["suche", "Suche"], ["posten", "Feste Posten"], ["kategorien", "Kategorien"], ["hinweise", "Hinweise"]];
 const inp = (p, v, o = {}) => `<input data-p="${p}" ${o.t ? `data-t="${o.t}"` : ""} ${o.t === "n" ? 'inputmode="decimal"' : ""} type="${o.type || "text"}" value="${esc(o.t === "n" ? fN(v) : v ?? "")}" ${o.ph ? `placeholder="${esc(o.ph)}"` : ""} ${o.al ? `aria-label="${esc(o.al)}"` : ""}>`;
 const fld = (label, html, c = "") => `<label class="f ${c}">${label}${html}</label>`;
-function catOptions(kinds, v, blank) {
+function catOptions(kinds, v, blank, own) {
   let h = blank ? `<option value="">${blank}</option>` : "";
   for (const k of kinds) { const groups = [...new Set(db.cats.filter((c) => c.kind === k).map((c) => c.group))]; for (const g of groups) h += `<optgroup label="${esc(kinds.length > 1 && g !== KINDS[k] ? KINDS[k] + " – " + g : g)}">${db.cats.filter((c) => c.kind === k && c.group === g).map((c) => `<option value="${c.id}" ${c.id === v ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</optgroup>`; }
+  if (own) h += `<option value="${OWN}" ${v === OWN ? "selected" : ""}>Eigene Kategorie …</option>`;
   return h;
 }
+const catOk = (id, kinds) => id === OWN || db.cats.some((c) => c.id === id && kinds.includes(c.kind));
 const typeKinds = (t) => (t === "in" ? ["in"] : t === "save" ? ["save"] : ["var", "fix"]);
 const typeOfKind = (k) => (k === "in" ? "in" : k === "save" ? "save" : "out");
 const delBtn = (act, id, label = "Löschen") => (st.confirm === act + id ? `<button class="danger" data-act="${act}" data-id="${id}" data-sure="1">Wirklich löschen?</button>` : `<button class="link" data-act="${act}" data-id="${id}">${label}</button>`);
@@ -310,11 +325,11 @@ function backupBanner() {
 /* ---------- Reiter: Monat ---------- */
 function viewMonat() {
   const from = st.month + "-01", to = mEnd(st.month), t = today(), list = booked(from, to), s = sums(list), q = st.q;
-  const kinds = typeKinds(q.type); if (!db.cats.some((c) => c.id === q.catId && kinds.includes(c.kind))) q.catId = st.lastCat[q.type] && cat(st.lastCat[q.type]) ? st.lastCat[q.type] : db.cats.find((c) => kinds.includes(c.kind))?.id || "";
+  const kinds = typeKinds(q.type); if (!catOk(q.catId, kinds)) q.catId = st.lastCat[q.type] && cat(st.lastCat[q.type]) ? st.lastCat[q.type] : db.cats.find((c) => kinds.includes(c.kind))?.id || "";
   const fut = to > t ? entries(t >= from ? iso(new Date(pd(t).getFullYear(), pd(t).getMonth(), pd(t).getDate() + 1)) : from, to) : [], fs = sums(fut);
   return `<div class="stack">${backupBanner()}
     <div class="panel stack"><h3>Schnell buchen</h3>${typeChips("q-type", q.type)}
-      <div class="grid4"><label class="f">Betrag<input data-q="amount" inputmode="decimal" value="${esc(q.amount)}" placeholder="0,00"></label><label class="f">Kategorie<select data-q="catId">${catOptions(kinds, q.catId)}</select></label><label class="f">Datum<input data-q="date" type="date" value="${q.date}"></label><label class="f">Notiz<input data-q="note" value="${esc(q.note)}"></label></div>
+      <div class="grid4"><label class="f">Betrag<input data-q="amount" inputmode="decimal" value="${esc(q.amount)}" placeholder="0,00"></label><label class="f">Kategorie<select data-q="catId">${catOptions(kinds, q.catId, "", true)}</select>${q.catId === OWN ? `<input data-q="catOwn" value="${esc(q.catOwn || "")}" placeholder="Name der Kategorie" style="margin-top:6px">` : ""}</label><label class="f">Datum<input data-q="date" type="date" value="${q.date}"></label><label class="f">Notiz<input data-q="note" value="${esc(q.note)}"></label></div>
       <div><button data-act="q-book">Buchen</button></div></div>
     ${monthNav()}${kpis(s)}
     ${fut.length ? `<div class="small muted">Bis Monatsende noch fällig: Einnahmen ${fE(fs.in)}, Ausgaben ${fE(fs.out)}, Rücklagen ${fE(fs.save)}. Voraussichtlich übrig: ${fE(s.rest + fs.rest)}.</div>` : ""}
@@ -394,9 +409,9 @@ function viewPosten() {
 }
 function formRec() {
   const d = st.form.d, kinds = d.type === "out" ? ["fix", "var"] : typeKinds(d.type);
-  if (!db.cats.some((c) => c.id === d.catId && kinds.includes(c.kind))) d.catId = db.cats.find((c) => kinds.includes(c.kind))?.id || "";
+  if (!catOk(d.catId, kinds)) d.catId = db.cats.find((c) => kinds.includes(c.kind))?.id || "";
   return `<div class="panel stack"><h2>${st.form.isNew ? "Neuer fester Posten" : "Fester Posten"}</h2>${typeChips("f-type", d.type)}
-    <div class="grid2">${fld("Kategorie", `<select data-p="catId">${catOptions(kinds, d.catId)}</select>`)}${fld("Bezeichnung (freiwillig)", inp("name", d.name, { ph: "z. B. Anbieter" }))}
+    <div class="grid2">${fld("Kategorie", `<select data-p="catId" data-re="1">${catOptions(kinds, d.catId, "", true)}</select>${d.catId === OWN ? `<input data-p="catOwn" value="${esc(d.catOwn || "")}" placeholder="Name der Kategorie" style="margin-top:6px">` : ""}`)}${fld("Bezeichnung (freiwillig)", inp("name", d.name, { ph: "z. B. Anbieter" }))}
       ${fld("Rhythmus", `<select data-p="rhythm" data-t="i">${Object.entries(RH).map(([k, l]) => `<option value="${k}" ${+k === d.rhythm ? "selected" : ""}>${l}</option>`).join("")}</select>`)}<span></span>
       ${fld("Erste Fälligkeit", inp("start", d.start, { type: "date" }))}${fld("Ende (leer = läuft weiter)", inp("end", d.end, { type: "date" }))}</div>
     <div class="eyebrow">Betrag</div>
@@ -416,9 +431,9 @@ function formOcc() {
 }
 function formTx() {
   const d = st.form.d, kinds = typeKinds(d.type);
-  if (!db.cats.some((c) => c.id === d.catId && kinds.includes(c.kind))) d.catId = db.cats.find((c) => kinds.includes(c.kind))?.id || "";
+  if (!catOk(d.catId, kinds)) d.catId = db.cats.find((c) => kinds.includes(c.kind))?.id || "";
   return `<div class="panel stack"><h2>Buchung ändern</h2>${typeChips("f-type", d.type)}
-    <div class="grid2">${fld("Betrag in €", inp("amount", d.amount, { t: "n" }))}${fld("Kategorie", `<select data-p="catId">${catOptions(kinds, d.catId)}</select>`)}${fld("Datum", inp("date", d.date, { type: "date" }))}${fld("Notiz", inp("note", d.note))}</div>
+    <div class="grid2">${fld("Betrag in €", inp("amount", d.amount, { t: "n" }))}${fld("Kategorie", `<select data-p="catId" data-re="1">${catOptions(kinds, d.catId, "", true)}</select>${d.catId === OWN ? `<input data-p="catOwn" value="${esc(d.catOwn || "")}" placeholder="Name der Kategorie" style="margin-top:6px">` : ""}`)}${fld("Datum", inp("date", d.date, { type: "date" }))}${fld("Notiz", inp("note", d.note))}</div>
     <div class="row"><button data-act="tx-save">Speichern</button><button class="link" data-act="form-no">Abbrechen</button>${delBtn("tx-del", d.id, "Buchung löschen")}</div></div>`;
 }
 
@@ -448,6 +463,7 @@ function viewHinweise() {
       <p class="hint">Das Einspielen ersetzt den gesamten Stand auf diesem Gerät durch den Inhalt der Datei. Der vorherige Stand bleibt für „Rückgängig“ erhalten, bis du erneut einspielst.</p></div>
     <div class="panel stack"><h2>So funktioniert die App</h2><ul class="plain">
       <li><b>Feste Posten:</b> Gehalt, Rente, Miete, Versicherungen oder Sparpläne legst du einmal unter „Feste Posten“ an. Die App bucht sie am Fälligkeitstag von selbst, auch rückwirkend ab der ersten Fälligkeit.</li>
+      <li><b>Eigene Kategorien:</b> In jeder Kategorie-Auswahl steht unten „Eigene Kategorie …“. Der Name wird dauerhaft angelegt, bei festen Posten unter den festen Ausgaben, sonst unter den laufenden. Gruppe und Budget änderst du unter „Kategorien“.</li>
       <li><b>Schnell buchen:</b> Alles andere trägst du auf der Seite „Monat“ ein: Betrag, Kategorie, Buchen.</li>
       <li><b>Einzelnen Termin ändern:</b> Einen festen Posten in der Monatsliste antippen, dann den Betrag nur für diesen Termin ändern oder ihn ausfallen lassen.</li>
       <li><b>Rücklagen:</b> Sparen zählt nicht als Ausgabe. Die App zeigt getrennt, was verbraucht, was zurückgelegt und was übrig ist.</li>
@@ -510,9 +526,9 @@ const ACT = {
   "m-mv"(b) { st.month = mAdd(st.month, +b.dataset.n); st.open = null; render(); },
   "y-mv"(b) { st.year = String(+st.year + +b.dataset.n); render(); },
   "q-type"(b) { st.q.type = b.dataset.v; st.q.catId = ""; render(); },
-  "q-book"() { const q = st.q, a = num(q.amount); if (a == null || a <= 0) return toast("Bitte einen Betrag eingeben."); if (!q.date) return toast("Bitte ein Datum angeben."); if (!cat(q.catId)) return toast("Bitte eine Kategorie wählen."); db.tx.push({ id: uid(), date: q.date, catId: q.catId, amount: a, note: q.note.trim() }); st.lastCat[q.type] = q.catId; save(); st.month = q.date.slice(0, 7); toast(`${catName(q.catId)}: ${fE(a)} gebucht`); q.amount = ""; q.note = ""; render(); },
+  "q-book"() { const q = st.q, a = num(q.amount); if (a == null || a <= 0) return toast("Bitte einen Betrag eingeben."); if (!q.date) return toast("Bitte ein Datum angeben."); if (q.catId === OWN) { const id = ownCat(q.catOwn, q.type === "out" ? "var" : q.type); if (!id) return toast("Bitte einen Namen für die Kategorie eingeben."); q.catId = id; q.catOwn = ""; } if (!cat(q.catId)) return toast("Bitte eine Kategorie wählen."); db.tx.push({ id: uid(), date: q.date, catId: q.catId, amount: a, note: q.note.trim() }); st.lastCat[q.type] = q.catId; save(); st.month = q.date.slice(0, 7); toast(`${catName(q.catId)}: ${fE(a)} gebucht`); q.amount = ""; q.note = ""; render(); },
   "tx-edit"(b) { const t = clone(db.tx.find((x) => x.id === b.dataset.id)); t.type = typeOfKind(kindOf(t.catId)); openForm("tx", t); },
-  "tx-save"() { const d = st.form.d; if (d.amount == null || d.amount <= 0) return toast("Bitte einen Betrag eingeben."); if (!d.date) return toast("Bitte ein Datum angeben."); const i = db.tx.findIndex((x) => x.id === d.id); db.tx[i] = { id: d.id, date: d.date, catId: d.catId, amount: d.amount, note: (d.note || "").trim() }; save(); closeForm(); toast("Buchung gespeichert"); },
+  "tx-save"() { const d = st.form.d; if (d.amount == null || d.amount <= 0) return toast("Bitte einen Betrag eingeben."); if (!d.date) return toast("Bitte ein Datum angeben."); if (d.catId === OWN) { const id = ownCat(d.catOwn, d.type === "out" ? "var" : d.type); if (!id) return toast("Bitte einen Namen für die Kategorie eingeben."); d.catId = id; } const i = db.tx.findIndex((x) => x.id === d.id); db.tx[i] = { id: d.id, date: d.date, catId: d.catId, amount: d.amount, note: (d.note || "").trim() }; save(); closeForm(); toast("Buchung gespeichert"); },
   "tx-del"(b) { if (!sure("tx-del", b.dataset.id)) return; db.tx = db.tx.filter((x) => x.id !== b.dataset.id); save(); closeForm(); toast("Buchung gelöscht"); },
   "f-type"(b) { st.form.d.type = b.dataset.v; st.form.d.catId = ""; render(); },
   "cat-open"(b) { st.open = st.open === b.dataset.id ? null : b.dataset.id; render(); },
@@ -522,7 +538,7 @@ const ACT = {
   "amt-add"() { st.form.d.amounts.push({ from: today(), amount: null }); render(); },
   "over-del"(b) { delete st.form.d.over[b.dataset.k]; render(); },
   "amt-del"(b) { st.form.d.amounts.splice(+b.dataset.i, 1); render(); },
-  "rec-save"() { const d = st.form.d; if (!d.start) return toast("Bitte die erste Fälligkeit angeben."); if (d.end && d.end < d.start) return toast("Das Ende liegt vor der ersten Fälligkeit."); if (d.amounts.some((a) => a.amount == null || a.amount < 0)) return toast("Bitte jeden Betrag ausfüllen."); if (d.amounts.slice(1).some((a) => !a.from)) return toast("Bitte bei jeder Betragsänderung das Datum angeben."); d.amounts[0].from = d.start < (d.amounts[1]?.from || "9999") ? d.start : "0000-01-01"; const r = { id: d.id, catId: d.catId, name: (d.name || "").trim(), rhythm: +d.rhythm, start: d.start, end: d.end || "", amounts: d.amounts, over: d.over || {} }; const i = db.recs.findIndex((x) => x.id === r.id); if (i >= 0) db.recs[i] = r; else db.recs.push(r); save(); st.tab = "posten"; closeForm(); toast("Fester Posten gespeichert"); },
+  "rec-save"() { const d = st.form.d; if (d.catId === OWN) { const id = ownCat(d.catOwn, d.type === "out" ? "fix" : d.type); if (!id) return toast("Bitte einen Namen für die Kategorie eingeben."); d.catId = id; } if (!d.start) return toast("Bitte die erste Fälligkeit angeben."); if (d.end && d.end < d.start) return toast("Das Ende liegt vor der ersten Fälligkeit."); if (d.amounts.some((a) => a.amount == null || a.amount < 0)) return toast("Bitte jeden Betrag ausfüllen."); if (d.amounts.slice(1).some((a) => !a.from)) return toast("Bitte bei jeder Betragsänderung das Datum angeben."); d.amounts[0].from = d.start < (d.amounts[1]?.from || "9999") ? d.start : "0000-01-01"; const r = { id: d.id, catId: d.catId, name: (d.name || "").trim(), rhythm: +d.rhythm, start: d.start, end: d.end || "", amounts: d.amounts, over: d.over || {} }; const i = db.recs.findIndex((x) => x.id === r.id); if (i >= 0) db.recs[i] = r; else db.recs.push(r); save(); st.tab = "posten"; closeForm(); toast("Fester Posten gespeichert"); },
   "rec-del"(b) { if (!sure("rec-del", b.dataset.id)) return; db.recs = db.recs.filter((x) => x.id !== b.dataset.id); save(); closeForm(); toast("Fester Posten gelöscht"); },
   "occ-edit"(b) { const r = db.recs.find((x) => x.id === b.dataset.id), d = b.dataset.d, o = r.over?.[d]; openForm("occ", { amount: o ? o.amount : recBase(r, d) }, { recId: r.id, date: d }); },
   "occ-save"() { const f = st.form, r = db.recs.find((x) => x.id === f.recId); if (f.d.amount == null || f.d.amount < 0) return toast("Bitte einen Betrag eingeben."); r.over = r.over || {}; if (f.d.amount === recBase(r, f.date)) delete r.over[f.date]; else r.over[f.date] = { amount: f.d.amount }; save(); closeForm(); toast("Termin gespeichert"); },
@@ -541,11 +557,11 @@ const app = document.getElementById("app");
 app.addEventListener("click", (e) => { const b = e.target.closest("[data-act]"); if (!b || b.disabled) return; if (b.tagName !== "BUTTON") { const inner = e.target.closest("button, a, input, select, label"); if (inner && inner !== b && b.contains(inner)) return; } const f = ACT[b.dataset.act]; if (f) f(b); });
 function bind(e) {
   const el = e.target;
-  if (el.dataset.q) { st.q[el.dataset.q] = el.value; return; }
+  if (el.dataset.q) { const was = st.q.catId; st.q[el.dataset.q] = el.value; if (el.dataset.q === "catId" && (el.value === OWN || was === OWN)) { render(); document.querySelector('[data-q="catOwn"]')?.focus(); } return; }
   if (el.dataset.s) { st.s[el.dataset.s] = el.value; if (e.type === "change" || el.dataset.s !== "text") render(); return; }
   if (!el.dataset.p || !st.form) return;
   setP(st.form.d, el.dataset.p, el.dataset.t === "n" ? num(el.value) : el.dataset.t === "i" ? +el.value : el.value);
-  if (e.type === "change" && el.dataset.re) { if (el.dataset.p === "kind") st.form.d.group = db.cats.find((c) => c.kind === el.value)?.group || "Sonstiges"; render(); }
+  if (e.type === "change" && el.dataset.re) { if (el.dataset.p === "catId" && el.value !== OWN && !("catOwn" in st.form.d)) return; if (el.dataset.p === "kind") st.form.d.group = db.cats.find((c) => c.kind === el.value)?.group || "Sonstiges"; render(); }
 }
 app.addEventListener("input", (e) => { if (e.target.dataset.s && e.target.dataset.s !== "text") return; if (e.target.dataset.s === "text") { st.s.text = e.target.value; return; } bind(e); });
 app.addEventListener("change", (e) => {
